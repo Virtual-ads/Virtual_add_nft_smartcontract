@@ -1,121 +1,84 @@
-use std::collections::HashMap;
+// To conserve gas, efficient serialization is achieved through Borsh (http://borsh.io/)
+use near_sdk::{AccountId, Promise, Balance, env, near_bindgen, log, setup_alloc, Timestamp};
+use near_sdk::collections::{UnorderedMap};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{LazyOption, LookupMap, UnorderedMap, UnorderedSet};
-use near_sdk::json_types::{Base64VecU8, U128};
 use near_sdk::serde::{Deserialize, Serialize};
-use near_sdk::{
-    env, near_bindgen, AccountId, Balance, CryptoHash, PanicOnDefault, Promise, PromiseOrValue,
-};
+use std::collections::HashMap;
 
-use crate::internal::*;
-pub use crate::metadata::*;
-pub use crate::mint::*;
-pub use crate::nft_core::*;
-pub use crate::approval::*;
-pub use crate::royalty::*;
-pub use crate::events::*;
+// 0.01 NEAR
+const SPOT_NEAR: Balance = 10_000_000_000_000_000_000_000;
 
-mod internal;
-mod approval; 
-mod enumeration; 
-mod metadata; 
-mod mint; 
-mod nft_core; 
-mod royalty; 
-mod events;
+setup_alloc!();
 
-/// This spec can be treated like a version of the standard.
-pub const NFT_METADATA_SPEC: &str = "nft-1.0.0";
-/// This is the name of the NFT standard we're using
-pub const NFT_STANDARD_NAME: &str = "nep171";
+pub use crate::creative::*;
+pub use crate::presentation::*;
+pub use crate::ad_spot::*;
 
-#[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize, PanicOnDefault)]
-pub struct Contract {
-    //contract owner
-    pub owner_id: AccountId,
+mod ad_spot;
+mod creative;
+mod presentation;
 
-    //keeps track of all the token IDs for a given account
-    pub tokens_per_owner: LookupMap<AccountId, UnorderedSet<TokenId>>,
-
-    //keeps track of the token struct for a given token ID
-    pub tokens_by_id: LookupMap<TokenId, Token>,
-
-    //keeps track of the token metadata for a given token ID
-    pub token_metadata_by_id: UnorderedMap<TokenId, TokenMetadata>,
-
-    //keeps track of the token metadata for a given token ID
-    pub token_webdata_by_id: UnorderedMap<TokenId, TokenWebdata>,
-
-    //keeps track of the metadata for the contract
-    pub metadata: LazyOption<NFTContractMetadata>,
-}
-
-/// Helper structure for keys of the persistent collections.
 #[derive(BorshSerialize)]
 pub enum StorageKey {
-    TokensPerOwner,
-    TokenPerOwnerInner { account_id_hash: CryptoHash },
-    TokensById,
-    TokenMetadataById,
-    NFTContractMetadata,
-    TokensPerType,
-    TokensPerTypeInner { token_type_hash: CryptoHash },
-    TokenTypesLocked,
-    TokenWebdataById,
+    Creatives,
+    Presentations,
+    AdSpot,
 }
 
 #[near_bindgen]
-impl Contract {
-    /*
-        initialization function (can only be called once).
-        this initializes the contract with default metadata so the
-        user doesn't have to manually type metadata.
-    */
-    #[init]
-    pub fn new_default_meta(owner_id: AccountId) -> Self {
-        //calls the other function "new: with some default metadata and the owner_id passed in 
-        Self::new(
-            owner_id,
-            NFTContractMetadata {
-                spec: "nft-1.0.0".to_string(),
-                name: "NFT Tutorial Contract".to_string(),
-                symbol: "GOTEAM".to_string(),
-                icon: None,
-                base_uri: None,
-                reference: None,
-                reference_hash: None,
-            },
-        )
-    }
+#[derive(BorshDeserialize, BorshSerialize)]
+pub struct MetaAdsContract {
+    pub creatives: UnorderedMap<u64, Creative>,
+    pub presentations: UnorderedMap<u64, Presentation>,
+    pub ad_spots: UnorderedMap<u64, AdSpot>,
+}
 
-    /*
-        initialization function (can only be called once).
-        this initializes the contract with metadata that was passed in and
-        the owner_id. 
-    */
-    #[init]
-    pub fn new(owner_id: AccountId, metadata: NFTContractMetadata) -> Self {
-        //create a variable of type Self with all the fields initialized. 
-        let this = Self {
-            //Storage keys are simply the prefixes used for the collections. This helps avoid data collision
-            tokens_per_owner: LookupMap::new(StorageKey::TokensPerOwner.try_to_vec().unwrap()),
-            tokens_by_id: LookupMap::new(StorageKey::TokensById.try_to_vec().unwrap()),
-            token_metadata_by_id: UnorderedMap::new(
-                StorageKey::TokenMetadataById.try_to_vec().unwrap(),
-            ),
-            token_webdata_by_id: UnorderedMap::new(
-                StorageKey::TokenWebdataById.try_to_vec().unwrap(),
-            ),
-            //set the owner_id field equal to the passed in owner_id. 
-            owner_id,
-            metadata: LazyOption::new(
-                StorageKey::NFTContractMetadata.try_to_vec().unwrap(),
-                Some(&metadata),
-            ),
-        };
-
-        //return the Contract object
-        this
+impl Default for MetaAdsContract {
+    fn default() -> Self {
+        assert!(!env::state_exists(), "The contract is already initialized");
+        Self {
+            creatives: UnorderedMap::new(StorageKey::Creatives.try_to_vec().unwrap()),
+            presentations: UnorderedMap::new(StorageKey::Presentations.try_to_vec().unwrap()),
+            ad_spots: UnorderedMap::new(StorageKey::AdSpot.try_to_vec().unwrap()),
+        }
     }
 }
+
+
+#[near_bindgen]
+impl MetaAdsContract {
+
+    #[private]
+    pub fn transfer_funds(&mut self, playback_id: u64) -> bool {
+        
+        assert!(playback_id > 0, "Abort. Presentation Id undefined");
+
+        match self.presentations.get(&playback_id) {
+            Some(mut presentation) => {
+                
+                assert!(presentation.transfered == false, "Abort. Transfer funds");
+
+                let time: u64 = env::block_timestamp() / 1000000000;
+                assert!(presentation.end_time <= time, "Abort. Presentation is active. Show time is not over yet");
+        
+                let total_funds: Balance = presentation.advertiser_cost - presentation.entertainment_fee;
+                let account_id = presentation.publisher_account_id.clone();
+        
+                Promise::new(account_id.clone()).transfer(total_funds);
+                
+                log!("The publisher {} received funds in the amount of {}", account_id.clone(), total_funds);
+
+                presentation.transfered = true;
+                presentation.status = String::from("success");
+                self.presentations.insert(&playback_id, &presentation);
+                
+                true
+            }
+            None => {
+                false
+            }
+        }
+    }
+}
+
+
